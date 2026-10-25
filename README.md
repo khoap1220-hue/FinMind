@@ -193,3 +193,11 @@ finmind/
 ---
 
 MIT Licensed. Built with ❤️.
+
+## Background Job Retry & Monitoring
+
+FinMind includes a resilient background job execution monitor (`app/services/job_monitor.py`) with configurable exponential backoff (`JobRetryPolicy`), Dead-Letter Queue (DLQ) recovery, and Prometheus metrics (`finmind_background_jobs_total`, `finmind_background_job_retries_total`, `finmind_background_job_duration_seconds`).
+
+- `GET /jobs/status` — Real-time execution counters and recent job history.
+- `GET /jobs/dead-letter` — Inspect jobs that exhausted retry attempts.
+- `POST /jobs/dead-letter/<job_id>/retry` — Replay a dead-lettered job.

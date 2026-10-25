@@ -4,6 +4,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..extensions import db
 from ..models import Bill, Reminder
 from ..observability import track_reminder_event
+from ..services.job_monitor import JobRetryPolicy, job_monitor
 from ..services.reminders import send_reminder
 import logging
 
@@ -170,10 +171,21 @@ def run_due():
         )
         .all()
     )
+    policy = JobRetryPolicy(max_retries=2, base_delay_seconds=0.0)
     for r in items:
-        send_reminder(r)
-        r.sent = True
-        track_reminder_event(event="sent", channel=r.channel)
+        ok, _res, _rec = job_monitor.execute(
+            "reminder_delivery",
+            lambda rem=r: bool(send_reminder(rem)) or True,
+            policy=policy,
+            metadata={"reminder_id": r.id, "channel": r.channel},
+        )
+        if ok:
+            r.sent = True
+            track_reminder_event(event="sent", channel=r.channel)
+        else:
+            track_reminder_event(
+                event="failed", channel=r.channel, status="error"
+            )
     db.session.commit()
     logger.info("Processed due reminders user=%s count=%s", uid, len(items))
     return jsonify(processed=len(items))

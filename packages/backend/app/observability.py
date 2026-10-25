@@ -39,7 +39,9 @@ class Observability:
     def __init__(self) -> None:
         self.multiprocess_enabled = bool(os.getenv("PROMETHEUS_MULTIPROC_DIR"))
         self.registry = (
-            None if self.multiprocess_enabled else CollectorRegistry(auto_describe=True)
+            None
+            if self.multiprocess_enabled
+            else CollectorRegistry(auto_describe=True)
         )
         self.http_requests_total = Counter(
             "finmind_http_requests_total",
@@ -60,9 +62,32 @@ class Observability:
             ["event", "channel", "status"],
             registry=self.registry,
         )
+        self.background_jobs_total = Counter(
+            "finmind_background_jobs_total",
+            "Total background job executions by job_name and status.",
+            ["job_name", "status"],
+            registry=self.registry,
+        )
+        self.background_job_retries_total = Counter(
+            "finmind_background_job_retries_total",
+            "Total retry attempts across background jobs.",
+            ["job_name"],
+            registry=self.registry,
+        )
+        self.background_job_duration_seconds = Histogram(
+            "finmind_background_job_duration_seconds",
+            "Background job execution duration in seconds.",
+            ["job_name"],
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+            registry=self.registry,
+        )
 
     def observe_http_request(
-        self, method: str, endpoint: str, status_code: int, duration_seconds: float
+        self,
+        method: str,
+        endpoint: str,
+        status_code: int,
+        duration_seconds: float,
     ) -> None:
         status = str(status_code)
         self.http_requests_total.labels(
@@ -79,6 +104,24 @@ class Observability:
             event=event, channel=channel, status=status
         ).inc()
 
+    def record_background_job(
+        self,
+        job_name: str,
+        status: str,
+        retries: int = 0,
+        duration_seconds: float = 0.0,
+    ) -> None:
+        self.background_jobs_total.labels(
+            job_name=job_name, status=status
+        ).inc()
+        if retries > 0:
+            self.background_job_retries_total.labels(job_name=job_name).inc(
+                retries
+            )
+        self.background_job_duration_seconds.labels(
+            job_name=job_name
+        ).observe(max(0.0, duration_seconds))
+
     def metrics_response(self) -> Response:
         if self.multiprocess_enabled:
             registry = CollectorRegistry()
@@ -86,7 +129,9 @@ class Observability:
             payload = generate_latest(registry)
         else:
             payload = generate_latest(self.registry)
-        return Response(payload, mimetype="text/plain; version=0.0.4; charset=utf-8")
+        return Response(
+            payload, mimetype="text/plain; version=0.0.4; charset=utf-8"
+        )
 
 
 def configure_logging(log_level: str) -> None:
@@ -121,7 +166,9 @@ def finalize_request(response: Response) -> Response:
     request_start = getattr(g, "request_start", None)
     if request_start is not None:
         elapsed = time.perf_counter() - request_start
-        endpoint = request.url_rule.rule if request.url_rule else request.path
+        endpoint = (
+            request.url_rule.rule if request.url_rule else request.path
+        )
         obs = current_app.extensions.get("observability")
         if obs:
             obs.observe_http_request(
@@ -133,7 +180,32 @@ def finalize_request(response: Response) -> Response:
     return response
 
 
-def track_reminder_event(event: str, channel: str, status: str = "ok") -> None:
+def track_reminder_event(
+    event: str, channel: str, status: str = "ok"
+) -> None:
+    if not has_request_context():
+        return
     obs = current_app.extensions.get("observability")
     if obs:
-        obs.record_reminder_event(event=event, channel=channel, status=status)
+        obs.record_reminder_event(
+            event=event, channel=channel, status=status
+        )
+
+
+def track_background_job(
+    job_name: str,
+    status: str,
+    retries: int = 0,
+    duration_seconds: float = 0.0,
+) -> None:
+    try:
+        obs = current_app.extensions.get("observability")
+        if obs:
+            obs.record_background_job(
+                job_name=job_name,
+                status=status,
+                retries=retries,
+                duration_seconds=duration_seconds,
+            )
+    except RuntimeError:
+        pass
